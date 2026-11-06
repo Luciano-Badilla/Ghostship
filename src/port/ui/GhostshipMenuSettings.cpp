@@ -424,7 +424,8 @@ void GhostshipMenu::AddMenuSettings() {
         .CVar(CVAR_TOUCH("Style"))
         .RaceDisable(false)
         .Options(ComboboxOptions()
-                     .Tooltip("Native draws flat on-screen buttons. Classic uses the N64 controller artwork.")
+                     .Tooltip("Native shows game-style buttons and moves the camera when you swipe the right side "
+                              "of the screen. Classic uses the N64 controller artwork.")
                      .ComboMap(touchStyleOptions)
                      .DefaultIndex(0));
     AddWidget(path, "Edit Touch Layout", WIDGET_BUTTON)

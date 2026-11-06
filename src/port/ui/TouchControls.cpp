@@ -12,7 +12,6 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <cstring>
 #include <vector>
 
 #if defined(PLATFORM_IOS) || defined(__IOS__) || defined(__ANDROID__)
@@ -87,6 +86,15 @@ struct OverlayState {
 
 OverlayState sState;
 int64_t sStickFinger = -1;
+
+// Native-style camera swipe: the finger driving it, where the current swipe step
+// started, and the C button being tapped (held for a few ticks, then released).
+int64_t sCamFinger = -1;
+ImVec2 sCamAnchor;
+uint16_t sCamPulseMask = 0;
+int sCamPulseTicks = 0;
+int sCamCooldownTicks = 0;
+
 constexpr int64_t kMouseFingerId = -0x4D6F7573; // synthetic finger for desktop testing
 
 // Edit-mode drag state. Targets: 0..N-1 = gameButtons index, -2 = stick, -3 = menu.
@@ -165,102 +173,37 @@ bool NativeStyle() {
     return CVarGetInteger(CVAR_TOUCH("Style"), 0) == 0;
 }
 
-// Each button takes its color from the action it performs, the way native HUDs do.
-ImU32 ActionColor(const char* id) {
-    if (std::strcmp(id, "A") == 0) return IM_COL32(70, 150, 255, 255);  // jump: blue
-    if (std::strcmp(id, "B") == 0) return IM_COL32(255, 95, 70, 255);   // attack: red-orange
-    if (std::strcmp(id, "Z") == 0) return IM_COL32(170, 100, 255, 255); // ground pound: violet
-    if (id[0] == 'C') return IM_COL32(255, 196, 70, 255);               // camera: gold
-    if (id[0] == 'D') return IM_COL32(235, 240, 250, 255);              // d-pad: white glass
-    return IM_COL32(120, 130, 150, 255);                                // shoulders, Start: slate
-}
-
-// Action icons drawn with lines so they stay sharp at any size. `c` is the
-// center and `s` the full height of the glyph.
-void GlyphJump(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
-    dl->AddLine(ImVec2(c.x, c.y + s * 0.5f), ImVec2(c.x, c.y - s * 0.5f), col, t);
-    dl->AddLine(ImVec2(c.x - s * 0.4f, c.y - s * 0.1f), ImVec2(c.x, c.y - s * 0.5f), col, t);
-    dl->AddLine(ImVec2(c.x + s * 0.4f, c.y - s * 0.1f), ImVec2(c.x, c.y - s * 0.5f), col, t);
-}
-
-// Ground pound: an arrow slamming into a floor bar.
-void GlyphGroundPound(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
-    dl->AddLine(ImVec2(c.x, c.y - s * 0.5f), ImVec2(c.x, c.y + s * 0.25f), col, t);
-    dl->AddLine(ImVec2(c.x - s * 0.4f, c.y), ImVec2(c.x, c.y + s * 0.25f), col, t);
-    dl->AddLine(ImVec2(c.x + s * 0.4f, c.y), ImVec2(c.x, c.y + s * 0.25f), col, t);
-    dl->AddLine(ImVec2(c.x - s * 0.45f, c.y + s * 0.5f), ImVec2(c.x + s * 0.45f, c.y + s * 0.5f), col, t);
-}
-
-void GlyphSword(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float t) {
-    const ImVec2 pommel(c.x - s * 0.35f, c.y + s * 0.35f);
-    const ImVec2 tip(c.x + s * 0.5f, c.y - s * 0.5f);
-    dl->AddLine(pommel, tip, col, t);
-    // Crossguard sits across the blade, a little way up from the pommel.
-    const ImVec2 g(c.x - s * 0.1f, c.y + s * 0.1f);
-    dl->AddLine(ImVec2(g.x - s * 0.22f, g.y - s * 0.22f), ImVec2(g.x + s * 0.22f, g.y + s * 0.22f), col, t);
-}
-
-void GlyphPause(ImDrawList* dl, ImVec2 c, float s, ImU32 col) {
-    const float bw = s * 0.16f;
-    dl->AddRectFilled(ImVec2(c.x - s * 0.22f, c.y - s * 0.3f), ImVec2(c.x - s * 0.22f + bw, c.y + s * 0.3f), col,
-                      bw * 0.3f);
-    dl->AddRectFilled(ImVec2(c.x + s * 0.06f, c.y - s * 0.3f), ImVec2(c.x + s * 0.06f + bw, c.y + s * 0.3f), col,
-                      bw * 0.3f);
-}
-
-// Native style: flat shapes instead of the emulator artwork. Ids match the
-// classic layout, so positions saved in edit mode still apply.
+// Native style: translucent buttons with game-icons.net artwork
+// (port/textures/touch), in an arc around Jump like mobile action games. The C
+// buttons become a swipe on the right side of the screen (see ApplyCameraSwipe);
+// the D-pad and L are left out because Super Mario 64 barely uses them. Ids
+// differ from the classic layout so its saved positions don't scatter this one.
 void BuildNativeButtons(OverlayState& state, float w, float h, float u) {
     state.gameButtons.clear();
-    const auto add = [&](uint16_t mask, const char* id, const char* label, float dirX, float dirY, ImVec2 fallback,
-                         float halfW, float halfH, ImU32 color) {
+    const auto add = [&](uint16_t mask, const char* id, const char* label, const char* texName, const char* texPath,
+                         ImVec2 fallback, float radius) {
         TouchButton b{};
         b.mask = mask;
         b.id = id;
         b.label = label;
-        b.color = color;
-        b.dirX = dirX;
-        b.dirY = dirY;
+        b.texName = texName;
+        b.texPath = texPath;
+        b.color = IM_COL32(20, 26, 44, 255);
         b.center = LoadPos(id, fallback, w, h);
-        b.halfW = halfW;
-        b.halfH = halfH;
+        b.halfW = radius;
+        b.halfH = radius;
         state.gameButtons.push_back(b);
     };
 
-    // Accent colors shown when pressed; darker tones keep the white glyph readable.
-    const ImU32 kBlue = IM_COL32(70, 130, 255, 255);
-    const ImU32 kGreen = IM_COL32(40, 175, 110, 255);
-    const ImU32 kYellow = IM_COL32(235, 145, 40, 255);
-    const ImU32 kRed = IM_COL32(230, 75, 90, 255);
-    const ImU32 kGray = IM_COL32(120, 130, 165, 255);
-
-    // Face buttons, bottom-right.
-    add(BTN_A, "A", "A", 0, 0, ImVec2(w - 2.6f * u, h - 3.0f * u), 1.4f * u, 1.4f * u, kBlue);
-    add(BTN_B, "B", "B", 0, 0, ImVec2(w - 5.6f * u, h - 4.2f * u), 1.1f * u, 1.1f * u, kGreen);
-
-    // C buttons in a diamond above the face buttons.
-    const ImVec2 c(w - 3.3f * u, h - 8.0f * u);
-    const float cOff = 1.55f * u;
-    add(BTN_CUP, "CUp", "C", 0, -1, ImVec2(c.x, c.y - cOff), 0.85f * u, 0.85f * u, kYellow);
-    add(BTN_CDOWN, "CDown", "C", 0, 1, ImVec2(c.x, c.y + cOff), 0.85f * u, 0.85f * u, kYellow);
-    add(BTN_CLEFT, "CLeft", "C", -1, 0, ImVec2(c.x - cOff, c.y), 0.85f * u, 0.85f * u, kYellow);
-    add(BTN_CRIGHT, "CRight", "C", 1, 0, ImVec2(c.x + cOff, c.y), 0.85f * u, 0.85f * u, kYellow);
-
-    // Shoulders as pills: L top-left, R and Z top-right.
-    add(BTN_L, "L", "L", 0, 0, ImVec2(7.5f * u, 1.6f * u), 1.6f * u, 0.6f * u, kGray);
-    add(BTN_R, "R", "R", 0, 0, ImVec2(w - 4.2f * u, 1.6f * u), 1.6f * u, 0.6f * u, kGray);
-    add(BTN_Z, "Z", "Z", 0, 0, ImVec2(w - 4.2f * u, 3.4f * u), 1.6f * u, 0.6f * u, kGray);
-
-    // D-pad cross on the left, clear of the stick ring.
-    const ImVec2 d(3.2f * u, h - 11.0f * u);
-    const float dOff = 1.5f * u;
-    add(BTN_DUP, "DUp", "D", 0, -1, ImVec2(d.x, d.y - dOff), 0.75f * u, 0.75f * u, kGray);
-    add(BTN_DDOWN, "DDown", "D", 0, 1, ImVec2(d.x, d.y + dOff), 0.75f * u, 0.75f * u, kGray);
-    add(BTN_DLEFT, "DLeft", "D", -1, 0, ImVec2(d.x - dOff, d.y), 0.75f * u, 0.75f * u, kGray);
-    add(BTN_DRIGHT, "DRight", "D", 1, 0, ImVec2(d.x + dOff, d.y), 0.75f * u, 0.75f * u, kGray);
-
-    // Start, bottom-center.
-    add(BTN_START, "Start", "START", 0, 0, ImVec2(w * 0.5f, h - 1.7f * u), 1.5f * u, 0.6f * u, kRed);
+    add(BTN_A, "Jump", "A", "Touch-Jump", "textures/touch/Jump.png", ImVec2(w - 3.0f * u, h - 3.0f * u), 1.75f * u);
+    add(BTN_B, "Punch", "B", "Touch-Punch", "textures/touch/Punch.png", ImVec2(w - 6.6f * u, h - 2.2f * u),
+        1.2f * u);
+    add(BTN_Z, "Pound", "Z", "Touch-Pound", "textures/touch/Pound.png", ImVec2(w - 6.2f * u, h - 5.6f * u),
+        1.05f * u);
+    add(BTN_R, "Camera", "R", "Touch-Camera", "textures/touch/Camera.png", ImVec2(w - 3.2f * u, h - 6.6f * u),
+        1.0f * u);
+    add(BTN_START, "Pause", "Start", "Touch-Pause", "textures/touch/Pause.png", ImVec2(w - 2.0f * u, 1.8f * u),
+        1.0f * u);
 }
 
 // Widget heights are multiples of the layout unit; widths follow the cropped
@@ -525,6 +468,62 @@ void HandleEditMode(OverlayState& state, const std::vector<Finger>& fingers, flo
     }
 }
 
+// Native style replaces the C buttons with a swipe: a free finger on the right
+// side of the screen taps the matching C button each time it travels one step
+// (Super Mario 64 rotates or zooms the camera once per press). The step anchor
+// then moves to the finger, so a long swipe keeps stepping.
+uint16_t ApplyCameraSwipe(const std::vector<const Finger*>& freeFingers, ImVec2 display) {
+    const Finger* camNow = nullptr;
+    for (const Finger* finger : freeFingers) {
+        if (finger->id == sCamFinger) {
+            camNow = finger;
+            break;
+        }
+    }
+    if (camNow == nullptr) {
+        sCamFinger = -1;
+        for (const Finger* finger : freeFingers) {
+            if (finger->id != sStickFinger && finger->pos.x >= display.x * 0.45f) {
+                sCamFinger = finger->id;
+                sCamAnchor = finger->pos;
+                camNow = finger;
+                break;
+            }
+        }
+    }
+
+    if (sCamPulseTicks > 0) {
+        sCamPulseTicks--;
+        if (sCamPulseTicks == 0) {
+            sCamCooldownTicks = 2; // the game needs to see the release before the next tap
+        }
+        return sCamPulseMask;
+    }
+    if (sCamCooldownTicks > 0) {
+        sCamCooldownTicks--;
+        return 0;
+    }
+    if (camNow == nullptr) {
+        return 0;
+    }
+
+    const float step = std::min(display.x, display.y) * 0.08f;
+    const float dx = camNow->pos.x - sCamAnchor.x;
+    const float dy = camNow->pos.y - sCamAnchor.y;
+    uint16_t mask = 0;
+    if (std::fabs(dx) >= step && std::fabs(dx) >= std::fabs(dy)) {
+        mask = dx > 0 ? BTN_CRIGHT : BTN_CLEFT;
+    } else if (std::fabs(dy) >= step) {
+        mask = dy > 0 ? BTN_CDOWN : BTN_CUP;
+    }
+    if (mask != 0) {
+        sCamPulseMask = mask;
+        sCamPulseTicks = 3;
+        sCamAnchor = camNow->pos;
+    }
+    return mask;
+}
+
 std::vector<Finger> GatherFingers() {
     std::vector<Finger> fingers;
     const ImVec2 display = ImGui::GetIO().DisplaySize;
@@ -672,6 +671,10 @@ extern "C" void TouchControls_ApplyPad(void* pads) {
                                  sState.stickAnchor.y + dy * sState.stickTravel * std::min(len, 1.0f));
     }
 
+    if (NativeStyle()) {
+        sState.buttons |= ApplyCameraSwipe(freeFingers, display);
+    }
+
     if (pads == nullptr || ShipCompat::GetControlDeck() == nullptr ||
         ShipCompat::GetControlDeck()->GamepadGameInputBlocked()) {
         return;
@@ -725,6 +728,30 @@ void TouchControlsOverlay::Draw() {
         }
     }
 
+    // Native artwork ships in ghostship.o2r under textures/touch.
+    static int nativeTextureAttempts = 120;
+    if (nat && nativeTextureAttempts > 0) {
+        bool missing = false;
+        const auto ensure = [&](const char* name, const char* path) {
+            if (gui->GetTextureByName(name) == nullptr) {
+                missing = true;
+                gui->LoadTextureFromRawImage(name, path);
+            }
+        };
+        for (const auto& button : sState.gameButtons) {
+            if (button.texName != nullptr) {
+                ensure(button.texName, button.texPath);
+            }
+        }
+        ensure("Touch-Menu", "textures/touch/Menu.png");
+        ensure("Touch-StickBase", "textures/touch/StickBase.png");
+        ensure("Touch-StickKnob", "textures/touch/StickKnob.png");
+        nativeTextureAttempts = missing ? nativeTextureAttempts - 1 : 0;
+        if (nativeTextureAttempts == 1) {
+            SPDLOG_WARN("TouchControls: native button artwork failed to load; using plain discs");
+        }
+    }
+
     const float u = std::min(ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y) * 0.055f *
                     std::clamp(CVarGetFloat(CVAR_TOUCH("Scale"), 1.0f), 0.5f, 2.0f);
     const float stroke = std::max(2.0f, u * 0.09f);
@@ -744,78 +771,33 @@ void TouchControlsOverlay::Draw() {
         drawList->AddImage(tex, min, max, uv0, uv1, IM_COL32(255, 255, 255, 0) | alpha(a));
     };
 
-    // Native button: a glossy disc tinted by its action, with an icon for that
-    // action. Pressed buttons brighten, shrink slightly and show a glow ring.
+    // Draws a native-style PNG centered on a point; false while it is not loaded yet.
+    const auto image = [&](const char* name, const ImVec2& c, float r, float a) {
+        ImTextureID tex = name != nullptr ? gui->GetTextureByName(name) : nullptr;
+        if (tex == nullptr) {
+            return false;
+        }
+        drawList->AddImage(tex, ImVec2(c.x - r, c.y - r), ImVec2(c.x + r, c.y + r), ImVec2(0, 0), ImVec2(1, 1),
+                           IM_COL32(255, 255, 255, 0) | alpha(a));
+        return true;
+    };
+
+    // Native button: its artwork, fully opaque and slightly smaller with a gold
+    // ring while pressed. A dark disc with its letter stands in until it loads.
     const auto drawNative = [&](const TouchButton& b) {
-        const ImU32 tint = rgb(ActionColor(b.id));
-        const ImU32 white = IM_COL32(255, 255, 255, 0);
-        const ImU32 black = IM_COL32(0, 0, 0, 0);
-        const ImU32 glyph = white | alpha(b.pressed ? 1.0f : 0.95f);
-        const float glyphT = std::max(2.0f, u * 0.09f);
-        const float press = b.pressed ? 0.92f : 1.0f;
-
-        if (b.halfW > b.halfH * 1.2f) {
-            // Shoulder, Z and Start pills.
-            const float hw = b.halfW * press;
-            const float hh = b.halfH * press;
-            const ImVec2 min(b.center.x - hw, b.center.y - hh);
-            const ImVec2 max(b.center.x + hw, b.center.y + hh);
-            drawList->AddRectFilled(ImVec2(min.x, min.y + thin * 2), ImVec2(max.x, max.y + thin * 2),
-                                    black | alpha(0.3f), hh);
-            drawList->AddRectFilled(min, max, tint | alpha(b.pressed ? 0.95f : 0.45f), hh);
-            drawList->AddRect(min, max, white | alpha(b.pressed ? 0.9f : 0.5f), hh, 0, thin);
-            if (std::strcmp(b.id, "Start") == 0) {
-                GlyphPause(drawList, b.center, hh * 1.4f, glyph);
-            } else if (std::strcmp(b.id, "Z") == 0) {
-                GlyphGroundPound(drawList, ImVec2(b.center.x - hw * 0.4f, b.center.y), hh * 1.5f, glyph, glyphT);
-                text(ImVec2(b.center.x + hw * 0.35f, b.center.y), hh * 1.0f, b.label, glyph);
-            } else {
-                text(b.center, hh * 1.05f, b.label, glyph);
-            }
-            return;
+        const float r = b.halfH * (b.pressed ? 0.92f : 1.0f);
+        if (!image(b.texName, b.center, r, b.pressed ? 1.0f : 0.85f)) {
+            drawList->AddCircleFilled(b.center, r, rgb(b.color) | alpha(0.6f));
+            drawList->AddCircle(b.center, r, IM_COL32(232, 176, 32, 0) | alpha(0.9f), 0, thin);
+            text(b.center, r * 0.8f, b.label, IM_COL32(255, 255, 255, 0) | alpha(0.95f));
         }
-
-        const float r = b.halfH * press;
-        drawList->AddCircleFilled(ImVec2(b.center.x, b.center.y + thin * 2), r, black | alpha(0.3f));
-        drawList->AddCircleFilled(b.center, r, tint | alpha(b.pressed ? 0.95f : 0.45f));
-        // A lighter upper cap gives the disc a glossy edge.
-        drawList->AddCircleFilled(ImVec2(b.center.x, b.center.y - r * 0.3f), r * 0.65f, white | alpha(0.1f));
-        drawList->AddCircle(b.center, r, white | alpha(b.pressed ? 0.9f : 0.5f), 0, thin);
         if (b.pressed) {
-            drawList->AddCircle(b.center, r * 1.2f, tint | alpha(0.6f), 0, thin);
-        }
-
-        const float g = r * 0.9f;
-        if (std::strcmp(b.id, "A") == 0) {
-            GlyphJump(drawList, b.center, g, glyph, glyphT);
-        } else if (std::strcmp(b.id, "B") == 0) {
-            GlyphSword(drawList, b.center, g, glyph, glyphT);
-        } else if (b.dirX != 0 || b.dirY != 0) {
-            // C and D-pad arms point outward.
-            const float a = r * 0.46f;
-            const ImVec2 apex(b.center.x + b.dirX * a * 0.5f, b.center.y + b.dirY * a * 0.5f);
-            const ImVec2 back(apex.x - b.dirX * a * 0.9f, apex.y - b.dirY * a * 0.9f);
-            const ImVec2 side(-b.dirY * a * 0.9f, b.dirX * a * 0.9f);
-            drawList->AddLine(ImVec2(back.x + side.x, back.y + side.y), apex, glyph, glyphT);
-            drawList->AddLine(ImVec2(back.x - side.x, back.y - side.y), apex, glyph, glyphT);
-        } else {
-            text(b.center, r * 1.05f, b.label, glyph);
+            drawList->AddCircle(b.center, r * 1.1f, IM_COL32(255, 220, 90, 0) | alpha(0.85f), 0, thin * 1.5f);
         }
     };
 
     // Menu toggle, drawn in every state (including while the menu is open).
-    if (nat) {
-        // Dark glass disc with three bars: the utility look Start shares.
-        drawList->AddCircleFilled(sState.menuCenter, sState.menuRadius, IM_COL32(0, 0, 0, 0) | alpha(0.35f));
-        drawList->AddCircle(sState.menuCenter, sState.menuRadius, IM_COL32(255, 255, 255, 0) | alpha(0.45f), 0, thin);
-        const float bar = sState.menuRadius * 0.45f;
-        const float gap = sState.menuRadius * 0.3f;
-        for (int i = -1; i <= 1; i++) {
-            const float y = sState.menuCenter.y + gap * i;
-            drawList->AddLine(ImVec2(sState.menuCenter.x - bar, y), ImVec2(sState.menuCenter.x + bar, y),
-                              IM_COL32(255, 255, 255, 0) | alpha(0.92f), thin);
-        }
-    } else {
+    if (!nat || !image("Touch-Menu", sState.menuCenter, sState.menuRadius, 0.85f)) {
         drawList->AddCircleFilled(sState.menuCenter, sState.menuRadius, IM_COL32(20, 20, 26, 0) | alpha(0.55f));
         drawList->AddCircle(sState.menuCenter, sState.menuRadius, IM_COL32(255, 255, 255, 0) | alpha(0.85f), 0, stroke);
         text(sState.menuCenter, sState.menuRadius * 1.1f, "=", IM_COL32(255, 255, 255, 0) | alpha(0.9f));
@@ -823,35 +805,6 @@ void TouchControlsOverlay::Draw() {
 
     if (sState.menuOpen) {
         return;
-    }
-
-    // Native style: the C cluster and the D-pad each sit on one dark pad, so they
-    // read as units. The pads follow the buttons when they are moved in edit mode.
-    if (nat) {
-        const auto drawPad = [&](const char* const ids[4]) {
-            ImVec2 lo(1e9f, 1e9f);
-            ImVec2 hi(-1e9f, -1e9f);
-            float reach = 0.0f;
-            for (const auto& b : sState.gameButtons) {
-                for (int i = 0; i < 4; i++) {
-                    if (std::strcmp(b.id, ids[i]) == 0) {
-                        lo = ImVec2(std::min(lo.x, b.center.x), std::min(lo.y, b.center.y));
-                        hi = ImVec2(std::max(hi.x, b.center.x), std::max(hi.y, b.center.y));
-                        reach = std::max(reach, b.halfH);
-                    }
-                }
-            }
-            if (reach <= 0.0f) {
-                return;
-            }
-            const float m = reach * 1.1f;
-            drawList->AddRectFilled(ImVec2(lo.x - m, lo.y - m), ImVec2(hi.x + m, hi.y + m),
-                                    IM_COL32(0, 0, 0, 0) | alpha(0.22f), m);
-        };
-        static const char* const kCamera[4] = { "CUp", "CDown", "CLeft", "CRight" };
-        static const char* const kDpad[4] = { "DUp", "DDown", "DLeft", "DRight" };
-        drawPad(kCamera);
-        drawPad(kDpad);
     }
 
     for (const auto& button : sState.gameButtons) {
@@ -892,15 +845,18 @@ void TouchControlsOverlay::Draw() {
     const ImVec2 nub = sState.stickHeld ? sState.stickPos : sState.stickRest;
     const float baseAlpha = sState.stickHeld ? 0.85f : 0.55f;
     if (nat) {
-        // Thin ring for the stick's travel; the cap is a glossy knob with a soft shadow.
+        // Gold-rimmed base for the stick's travel and a star knob that follows the
+        // thumb; plain circles stand in until the artwork loads.
         const float ringAlpha = sState.stickHeld ? 1.0f : 0.6f;
         const ImU32 white = IM_COL32(255, 255, 255, 0);
-        drawList->AddCircleFilled(base, sState.stickTravel, white | alpha(0.1f * ringAlpha));
-        drawList->AddCircle(base, sState.stickTravel, white | alpha(0.4f * ringAlpha), 0, thin);
-        drawList->AddCircleFilled(ImVec2(nub.x, nub.y + thin * 2), sState.nubRadius,
-                                  IM_COL32(0, 0, 0, 0) | alpha(0.3f));
-        drawList->AddCircleFilled(nub, sState.nubRadius, white | alpha(sState.stickHeld ? 0.6f : 0.35f));
-        drawList->AddCircle(nub, sState.nubRadius, white | alpha(0.85f * ringAlpha), 0, thin);
+        if (!image("Touch-StickBase", base, sState.stickTravel + sState.nubRadius * 0.5f, ringAlpha)) {
+            drawList->AddCircleFilled(base, sState.stickTravel, white | alpha(0.1f * ringAlpha));
+            drawList->AddCircle(base, sState.stickTravel, white | alpha(0.4f * ringAlpha), 0, thin);
+        }
+        if (!image("Touch-StickKnob", nub, sState.nubRadius, sState.stickHeld ? 1.0f : 0.75f)) {
+            drawList->AddCircleFilled(nub, sState.nubRadius, white | alpha(sState.stickHeld ? 0.6f : 0.35f));
+            drawList->AddCircle(nub, sState.nubRadius, white | alpha(0.85f * ringAlpha), 0, thin);
+        }
     } else {
         // Stick: AnalogStickOutline is the housing/gate ring (base), AnalogStick is
         // the cap (deflected position); circles are the no-texture fallback.
