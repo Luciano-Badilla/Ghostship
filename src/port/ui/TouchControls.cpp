@@ -149,6 +149,7 @@ void RegisterCVars() {
     CVarRegisterInteger(CVAR_TOUCH("Enabled"), TOUCH_CONTROLS_DEFAULT);
     CVarRegisterFloat(CVAR_TOUCH("Scale"), 1.0f);
     CVarRegisterFloat(CVAR_TOUCH("Opacity"), 0.8f);
+    CVarRegisterInteger(CVAR_TOUCH("Style"), 0);
     // Edit mode never persists across runs.
     CVarSetInteger(CVAR_TOUCH("EditMode"), 0);
 }
@@ -156,6 +157,66 @@ void RegisterCVars() {
 bool Enabled() {
     RegisterCVars();
     return CVarGetInteger(CVAR_TOUCH("Enabled"), TOUCH_CONTROLS_DEFAULT) != 0;
+}
+
+// Style 0 (default) is the flat native look; style 1 keeps the N64 controller artwork.
+bool NativeStyle() {
+    return CVarGetInteger(CVAR_TOUCH("Style"), 0) == 0;
+}
+
+// Native style: flat shapes instead of the emulator artwork. Ids match the
+// classic layout, so positions saved in edit mode still apply.
+void BuildNativeButtons(OverlayState& state, float w, float h, float u) {
+    state.gameButtons.clear();
+    const auto add = [&](uint16_t mask, const char* id, const char* label, float dirX, float dirY, ImVec2 fallback,
+                         float halfW, float halfH, ImU32 color) {
+        TouchButton b{};
+        b.mask = mask;
+        b.id = id;
+        b.label = label;
+        b.color = color;
+        b.dirX = dirX;
+        b.dirY = dirY;
+        b.center = LoadPos(id, fallback, w, h);
+        b.halfW = halfW;
+        b.halfH = halfH;
+        state.gameButtons.push_back(b);
+    };
+
+    // Accent colors shown when pressed; darker tones keep the white glyph readable.
+    const ImU32 kBlue = IM_COL32(70, 130, 255, 255);
+    const ImU32 kGreen = IM_COL32(40, 175, 110, 255);
+    const ImU32 kYellow = IM_COL32(235, 145, 40, 255);
+    const ImU32 kRed = IM_COL32(230, 75, 90, 255);
+    const ImU32 kGray = IM_COL32(120, 130, 165, 255);
+
+    // Face buttons, bottom-right.
+    add(BTN_A, "A", "A", 0, 0, ImVec2(w - 2.6f * u, h - 3.0f * u), 1.4f * u, 1.4f * u, kBlue);
+    add(BTN_B, "B", "B", 0, 0, ImVec2(w - 5.6f * u, h - 4.2f * u), 1.1f * u, 1.1f * u, kGreen);
+
+    // C buttons in a diamond above the face buttons.
+    const ImVec2 c(w - 3.3f * u, h - 8.0f * u);
+    const float cOff = 1.55f * u;
+    add(BTN_CUP, "CUp", "C", 0, -1, ImVec2(c.x, c.y - cOff), 0.85f * u, 0.85f * u, kYellow);
+    add(BTN_CDOWN, "CDown", "C", 0, 1, ImVec2(c.x, c.y + cOff), 0.85f * u, 0.85f * u, kYellow);
+    add(BTN_CLEFT, "CLeft", "C", -1, 0, ImVec2(c.x - cOff, c.y), 0.85f * u, 0.85f * u, kYellow);
+    add(BTN_CRIGHT, "CRight", "C", 1, 0, ImVec2(c.x + cOff, c.y), 0.85f * u, 0.85f * u, kYellow);
+
+    // Shoulders as pills: L top-left, R and Z top-right.
+    add(BTN_L, "L", "L", 0, 0, ImVec2(7.5f * u, 1.6f * u), 1.6f * u, 0.6f * u, kGray);
+    add(BTN_R, "R", "R", 0, 0, ImVec2(w - 4.2f * u, 1.6f * u), 1.6f * u, 0.6f * u, kGray);
+    add(BTN_Z, "Z", "Z", 0, 0, ImVec2(w - 4.2f * u, 3.4f * u), 1.6f * u, 0.6f * u, kGray);
+
+    // D-pad cross on the left, clear of the stick ring.
+    const ImVec2 d(3.2f * u, h - 11.0f * u);
+    const float dOff = 1.5f * u;
+    add(BTN_DUP, "DUp", "D", 0, -1, ImVec2(d.x, d.y - dOff), 0.75f * u, 0.75f * u, kGray);
+    add(BTN_DDOWN, "DDown", "D", 0, 1, ImVec2(d.x, d.y + dOff), 0.75f * u, 0.75f * u, kGray);
+    add(BTN_DLEFT, "DLeft", "D", -1, 0, ImVec2(d.x - dOff, d.y), 0.75f * u, 0.75f * u, kGray);
+    add(BTN_DRIGHT, "DRight", "D", 1, 0, ImVec2(d.x + dOff, d.y), 0.75f * u, 0.75f * u, kGray);
+
+    // Start, bottom-center.
+    add(BTN_START, "Start", "START", 0, 0, ImVec2(w * 0.5f, h - 1.7f * u), 1.5f * u, 0.6f * u, kRed);
 }
 
 // Widget heights are multiples of the layout unit; widths follow the cropped
@@ -284,6 +345,10 @@ void ComputeLayout(OverlayState& state) {
     state.gameButtons.push_back(make(BTN_START, "Start", "S", "Start-Btn", "textures/buttons/StartBtn.png",
                                      "Start-Btn Outline", "textures/buttons/StartBtnOutline.png", rStart, kRed, 0, 0,
                                      ImVec2(w * 0.5f, h - 1.7f * u), 0.9f * u));
+
+    if (NativeStyle()) {
+        BuildNativeButtons(state, w, h, u);
+    }
 }
 
 float Dist(const ImVec2& a, const ImVec2& b) {
@@ -592,9 +657,11 @@ void TouchControlsOverlay::Draw() {
     ImDrawList* drawList = ImGui::GetForegroundDrawList();
     const auto gui = std::static_pointer_cast<Fast::Fast3dGui>(ShipCompat::GetWindow()->GetGui());
 
+    // Native style draws shapes only; the artwork loader runs for classic style.
+    const bool nat = NativeStyle();
     // Registry names shared with InputViewer; retry while archives settle.
     static int textureAttempts = 120;
-    if (textureAttempts > 0) {
+    if (!nat && textureAttempts > 0) {
         bool missing = false;
         const auto ensure = [&](const char* name, const char* path) {
             if (gui->GetTextureByName(name) == nullptr) {
@@ -617,6 +684,7 @@ void TouchControlsOverlay::Draw() {
     const float u = std::min(ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y) * 0.055f *
                     std::clamp(CVarGetFloat(CVAR_TOUCH("Scale"), 1.0f), 0.5f, 2.0f);
     const float stroke = std::max(2.0f, u * 0.09f);
+    const float thin = std::max(1.5f, u * 0.06f);
     ImFont* font = ImGui::GetFont();
 
     const auto alpha = [opacity](float a) { return (ImU32)(std::min(a, 1.0f) * opacity * 255.0f) << IM_COL32_A_SHIFT; };
@@ -632,16 +700,63 @@ void TouchControlsOverlay::Draw() {
         drawList->AddImage(tex, min, max, uv0, uv1, IM_COL32(255, 255, 255, 0) | alpha(a));
     };
 
+    // Native button: translucent disc that fills with its accent color when
+    // pressed, labelled with a letter or an outward chevron.
+    const auto drawNative = [&](const TouchButton& b) {
+        const ImU32 ink = IM_COL32(255, 255, 255, 0) | alpha(b.pressed ? 1.0f : 0.92f);
+        const ImU32 edge = IM_COL32(255, 255, 255, 0) | alpha(b.pressed ? 0.9f : 0.55f);
+        const ImU32 fill = b.pressed ? (rgb(b.color) | alpha(0.9f)) : (IM_COL32(255, 255, 255, 0) | alpha(0.22f));
+        if (b.halfW > b.halfH * 1.2f) {
+            // Shoulder and Start pills.
+            const ImVec2 min(b.center.x - b.halfW, b.center.y - b.halfH);
+            const ImVec2 max(b.center.x + b.halfW, b.center.y + b.halfH);
+            drawList->AddRectFilled(min, max, fill, b.halfH);
+            drawList->AddRect(min, max, edge, b.halfH, 0, thin);
+            text(b.center, b.halfH * 1.05f, b.label, ink);
+            return;
+        }
+        const float r = b.halfH;
+        drawList->AddCircleFilled(b.center, r, fill);
+        drawList->AddCircle(b.center, r, edge, 0, thin);
+        if (b.dirX != 0 || b.dirY != 0) {
+            const float a = r * 0.46f;
+            const ImVec2 apex(b.center.x + b.dirX * a * 0.5f, b.center.y + b.dirY * a * 0.5f);
+            const ImVec2 back(apex.x - b.dirX * a * 0.9f, apex.y - b.dirY * a * 0.9f);
+            const ImVec2 side(-b.dirY * a * 0.9f, b.dirX * a * 0.9f);
+            drawList->AddLine(ImVec2(back.x + side.x, back.y + side.y), apex, ink, thin);
+            drawList->AddLine(ImVec2(back.x - side.x, back.y - side.y), apex, ink, thin);
+        } else {
+            text(b.center, r * 1.05f, b.label, ink);
+        }
+    };
+
     // Menu toggle, drawn in every state (including while the menu is open).
-    drawList->AddCircleFilled(sState.menuCenter, sState.menuRadius, IM_COL32(20, 20, 26, 0) | alpha(0.55f));
-    drawList->AddCircle(sState.menuCenter, sState.menuRadius, IM_COL32(255, 255, 255, 0) | alpha(0.85f), 0, stroke);
-    text(sState.menuCenter, sState.menuRadius * 1.1f, "=", IM_COL32(255, 255, 255, 0) | alpha(0.9f));
+    if (nat) {
+        drawList->AddCircleFilled(sState.menuCenter, sState.menuRadius, IM_COL32(255, 255, 255, 0) | alpha(0.22f));
+        drawList->AddCircle(sState.menuCenter, sState.menuRadius, IM_COL32(255, 255, 255, 0) | alpha(0.55f), 0, thin);
+        // Three bars instead of the emulator-style "=" glyph.
+        const float bar = sState.menuRadius * 0.45f;
+        const float gap = sState.menuRadius * 0.3f;
+        for (int i = -1; i <= 1; i++) {
+            const float y = sState.menuCenter.y + gap * i;
+            drawList->AddLine(ImVec2(sState.menuCenter.x - bar, y), ImVec2(sState.menuCenter.x + bar, y),
+                              IM_COL32(255, 255, 255, 0) | alpha(0.92f), thin);
+        }
+    } else {
+        drawList->AddCircleFilled(sState.menuCenter, sState.menuRadius, IM_COL32(20, 20, 26, 0) | alpha(0.55f));
+        drawList->AddCircle(sState.menuCenter, sState.menuRadius, IM_COL32(255, 255, 255, 0) | alpha(0.85f), 0, stroke);
+        text(sState.menuCenter, sState.menuRadius * 1.1f, "=", IM_COL32(255, 255, 255, 0) | alpha(0.9f));
+    }
 
     if (sState.menuOpen) {
         return;
     }
 
     for (const auto& button : sState.gameButtons) {
+        if (nat) {
+            drawNative(button);
+            continue;
+        }
         ImTextureID solidTex = gui->GetTextureByName(button.texName);
         ImTextureID outlineTex = gui->GetTextureByName(button.outlineName);
         if (solidTex != nullptr || outlineTex != nullptr) {
@@ -671,33 +786,44 @@ void TouchControlsOverlay::Draw() {
         }
     }
 
-    // Stick: AnalogStickOutline is the housing/gate ring (base), AnalogStick is
-    // the cap (deflected position); circles are the no-texture fallback.
     const ImVec2 base = sState.stickHeld ? sState.stickAnchor : sState.stickRest;
     const ImVec2 nub = sState.stickHeld ? sState.stickPos : sState.stickRest;
     const float baseAlpha = sState.stickHeld ? 0.85f : 0.55f;
-    ImTextureID capTex = gui->GetTextureByName("Analog-Stick");
-    ImTextureID gateTex = gui->GetTextureByName("Analog-Stick Outline");
-    // Housing/gate crop within the 327x175 frame (ring around the cap's spot).
-    const ImVec2 gateUv0(18.0f / kFrameW, 40.0f / kFrameH);
-    const ImVec2 gateUv1(116.0f / kFrameW, 138.0f / kFrameH);
-    // Sized so the cap touches the gate ring at full deflection.
-    const float gateHalf = sState.stickTravel + sState.nubRadius;
-    if (gateTex != nullptr) {
-        drawList->AddImage(gateTex, ImVec2(base.x - gateHalf, base.y - gateHalf),
-                           ImVec2(base.x + gateHalf, base.y + gateHalf), gateUv0, gateUv1,
-                           IM_COL32(255, 255, 255, 0) | alpha(baseAlpha));
+    if (nat) {
+        // Flat ring for the stick's travel with a soft cap that follows the thumb.
+        const float ringAlpha = sState.stickHeld ? 1.0f : 0.6f;
+        drawList->AddCircleFilled(base, sState.stickTravel, IM_COL32(255, 255, 255, 0) | alpha(0.12f * ringAlpha));
+        drawList->AddCircle(base, sState.stickTravel, IM_COL32(255, 255, 255, 0) | alpha(0.35f * ringAlpha), 0, thin);
+        drawList->AddCircleFilled(nub, sState.nubRadius,
+                                  IM_COL32(255, 255, 255, 0) | alpha(sState.stickHeld ? 0.5f : 0.3f));
+        drawList->AddCircle(nub, sState.nubRadius, IM_COL32(255, 255, 255, 0) | alpha(0.7f * ringAlpha), 0, thin);
     } else {
-        drawList->AddCircleFilled(base, sState.stickTravel, IM_COL32(20, 20, 26, 0) | alpha(0.22f * baseAlpha));
-        drawList->AddCircle(base, sState.stickTravel, IM_COL32(255, 255, 255, 0) | alpha(baseAlpha), 0, stroke);
-    }
-    if (capTex != nullptr) {
-        drawList->AddImage(capTex, ImVec2(nub.x - sState.nubRadius, nub.y - sState.nubRadius),
-                           ImVec2(nub.x + sState.nubRadius, nub.y + sState.nubRadius), sState.stickUv0, sState.stickUv1,
-                           IM_COL32(255, 255, 255, 0) | alpha(baseAlpha + 0.15f));
-    } else {
-        drawList->AddCircleFilled(nub, sState.nubRadius, IM_COL32(190, 190, 200, 0) | alpha(baseAlpha));
-        drawList->AddCircle(nub, sState.nubRadius, IM_COL32(255, 255, 255, 0) | alpha(baseAlpha + 0.15f), 0, stroke);
+        // Stick: AnalogStickOutline is the housing/gate ring (base), AnalogStick is
+        // the cap (deflected position); circles are the no-texture fallback.
+        ImTextureID capTex = gui->GetTextureByName("Analog-Stick");
+        ImTextureID gateTex = gui->GetTextureByName("Analog-Stick Outline");
+        // Housing/gate crop within the 327x175 frame (ring around the cap's spot).
+        const ImVec2 gateUv0(18.0f / kFrameW, 40.0f / kFrameH);
+        const ImVec2 gateUv1(116.0f / kFrameW, 138.0f / kFrameH);
+        // Sized so the cap touches the gate ring at full deflection.
+        const float gateHalf = sState.stickTravel + sState.nubRadius;
+        if (gateTex != nullptr) {
+            drawList->AddImage(gateTex, ImVec2(base.x - gateHalf, base.y - gateHalf),
+                               ImVec2(base.x + gateHalf, base.y + gateHalf), gateUv0, gateUv1,
+                               IM_COL32(255, 255, 255, 0) | alpha(baseAlpha));
+        } else {
+            drawList->AddCircleFilled(base, sState.stickTravel, IM_COL32(20, 20, 26, 0) | alpha(0.22f * baseAlpha));
+            drawList->AddCircle(base, sState.stickTravel, IM_COL32(255, 255, 255, 0) | alpha(baseAlpha), 0, stroke);
+        }
+        if (capTex != nullptr) {
+            drawList->AddImage(capTex, ImVec2(nub.x - sState.nubRadius, nub.y - sState.nubRadius),
+                               ImVec2(nub.x + sState.nubRadius, nub.y + sState.nubRadius), sState.stickUv0,
+                               sState.stickUv1, IM_COL32(255, 255, 255, 0) | alpha(baseAlpha + 0.15f));
+        } else {
+            drawList->AddCircleFilled(nub, sState.nubRadius, IM_COL32(190, 190, 200, 0) | alpha(baseAlpha));
+            drawList->AddCircle(nub, sState.nubRadius, IM_COL32(255, 255, 255, 0) | alpha(baseAlpha + 0.15f), 0,
+                                stroke);
+        }
     }
 
     // Layout-edit chrome: highlight the dragged widget, Done/Reset pills, hint.

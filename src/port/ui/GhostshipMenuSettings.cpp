@@ -416,6 +416,17 @@ void GhostshipMenu::AddMenuSettings() {
         .RaceDisable(false)
         .Options(FloatSliderOptions().Min(0.1f).Max(1.0f).DefaultValue(0.7f).IsPercentage().Tooltip(
             "Opacity of the on-screen controls."));
+    static const std::unordered_map<int32_t, const char*> touchStyleOptions = {
+        { 0, "Native" },
+        { 1, "Classic (N64 art)" },
+    };
+    AddWidget(path, "Touch Controls Style", WIDGET_CVAR_COMBOBOX)
+        .CVar(CVAR_TOUCH("Style"))
+        .RaceDisable(false)
+        .Options(ComboboxOptions()
+                     .Tooltip("Native draws flat on-screen buttons. Classic uses the N64 controller artwork.")
+                     .ComboMap(touchStyleOptions)
+                     .DefaultIndex(0));
     AddWidget(path, "Edit Touch Layout", WIDGET_BUTTON)
         .Options(ButtonOptions().Tooltip(
             "Closes the menu and lets you drag the on-screen controls to new positions.\nTap Done to save or Reset "
